@@ -137,3 +137,72 @@ Visit the official documentation for Cosmos EVM: [evm.cosmos.network](https://ev
   applications in Golang
 - [The Inter-Blockchain Communication Protocol (IBC)](https://github.com/cosmos/ibc-go/) - A blockchain interoperability protocol that allows blockchains to transfer any type of data encoded in bytes.
 - [CometBFT](https://github.com/cometbft/cometbft) - High-performance, 10k+ TPS configurable BFT consensus engine.
+
+
+### To run the code 
+
+
+# Minimal one-node init script that works like your large working script
+# Adjust these as you want:
+HOME_DIR="./node0"
+CHAIN_ID="1282"
+MONIKER="node0"
+KEYRING="test"
+KEYALGO="eth_secp256k1"
+BOND_DENOM="aatom"
+GENESIS_BALANCE="1000000000000000000000000000000000$BOND_DENOM"
+GENTX_STAKE="10000000000000000000$BOND_DENOM"
+GENTX_GAS_PRICES="1000000$BOND_DENOM"    
+BASEFEE="1000000$BOND_DENOM"
+
+# Clean previous state (be careful)
+rm -rf "${HOME_DIR}"
+
+# Ensure evmd binary is the one you expect
+command -v evmd >/dev/null 2>&1 || { echo "evmd not found in PATH"; exit 1; }
+echo "Using evmd: $(which evmd)"; evmd version
+
+# Make sure the home dir's config uses the right client defaults
+mkdir -p "${HOME_DIR}"
+
+# Set the client config before init (helps some CLI flows)
+evmd config set client chain-id "${CHAIN_ID}" --home "${HOME_DIR}"
+evmd config set client keyring-backend "${KEYRING}" --home "${HOME_DIR}"
+
+# 1) init node
+evmd init "${MONIKER}" --chain-id "${CHAIN_ID}" --home "${HOME_DIR}"
+
+# 2) create validator key (store key in the same home; we use the same keyring and home)
+evmd keys add val0 --keyring-backend "${KEYRING}" --algo "${KEYALGO}" --home "${HOME_DIR}"
+
+# 3) make sure genesis denom values align (mint, staking, evm, bank metadata)
+# Use jq to edit genesis.json safely (it exists after init)
+GENESIS="${HOME_DIR}/config/genesis.json"
+TMP="${HOME_DIR}/config/genesis.tmp.json"
+
+# Set mint, staking, evm denom and add simple denom metadata (so modules agree)
+jq --arg d "$BOND_DENOM" \
+  '.app_state.mint.params.mint_denom = $d
+   | .app_state.staking.params.bond_denom = $d
+   | .app_state.evm.params.evm_denom = $d
+   | .app_state.bank.denom_metadata = [{"description":"Dev token","denom_units":[{"denom":$d,"exponent":0},{"denom":"test","exponent":18}],"base":$d,"display":"test","name":"Test Token","symbol":"TEST"}]' \
+   "$GENESIS" > "$TMP" && mv "$TMP" "$GENESIS"
+
+# 4) add genesis account (fund validator)
+ADDR=$(evmd keys show val0 -a --keyring-backend "${KEYRING}" --home "${HOME_DIR}")
+evmd genesis add-genesis-account "$ADDR" "$GENESIS_BALANCE" --home "${HOME_DIR}" --keyring-backend "${KEYRING}"
+
+# 5) create gentx (run from same home where key exists; include gas-prices)
+evmd genesis gentx val0 "${GENTX_STAKE}" --chain-id "${CHAIN_ID}" \
+  --keyring-backend "${KEYRING}" --home "${HOME_DIR}" --moniker "${MONIKER}" \
+  --gas-prices "${GENTX_GAS_PRICES}"
+
+# 6) collect gentxs & validate
+evmd genesis collect-gentxs --home "${HOME_DIR}"
+evmd genesis validate-genesis --home "${HOME_DIR}"
+
+# 7) start node
+echo "Starting node (home=${HOME_DIR})..."
+evmd start --home "${HOME_DIR}"
+
+
